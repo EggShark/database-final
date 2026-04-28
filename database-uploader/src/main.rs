@@ -7,9 +7,10 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, PgConnection};
 use sqlx::PgPool;
 
+use std::env;
+
 // means this is compiled with the secret but uhhh oh well :3
-// set search_path TO group121061, public;
-const CREDS: &str = include_str!("../secret");
+const CREDS: &str = include_str!("../../secret");
 
 #[derive(Debug)]
 struct Alpr {
@@ -25,12 +26,41 @@ struct Alpr {
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = env::args().collect();
+
     let (user_name, password) = CREDS.split_once('\n').unwrap();
-    let url = format!("postgresql://{}:{}@ada.mines.edu/csci403", user_name, password);
+
+    let mut scheema: &str = user_name;
+    let mut server: &str = "ada.mines.edu/csci403";
+
+    let mut args = args.iter().peekable();
+    // gets rid of the path of the executeable
+    args.next();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-s" | "--schema" => if let Some(s) = args.peek() {
+                scheema = s.as_str();
+                args.next();
+            } else {
+                println!("expected scheema after {} flag", arg)
+            },
+            "-u" | "--url" => if let Some(s) = args.peek() {
+                server = s.as_str();
+                args.next();
+            } else {
+                println!("expected a server url after {} flag", arg)
+            },
+            a => println!("unknwon arg of {}", a),
+        }
+    }
+
+
+    let url = format!("postgresql://{}:{}@{}", user_name, password, server);
 
 
     let mut con = PgConnection::connect(&url).await.unwrap();
-    let setup = delete_and_create_tables(&mut con, "group120800");
+    let setup = delete_and_create_tables(&mut con, scheema);
 
     let data = extract_alpr_data_from_geojson("ALPRs.geojson");
     setup.await;

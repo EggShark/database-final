@@ -136,7 +136,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "database-final"
+name = "database-uploader"
 version = "0.1.0"
 dependencies = [
  "serde_json",
