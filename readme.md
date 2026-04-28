@@ -23,7 +23,7 @@ Where the scheema you enter is the desired output scheema.
 
 just make sure `ALPRs.geojson` is in the same directory as the executable.
 ### Mines student off campus
-In your `.ssh` file set up and entry called `isen_jumpbox` that connects to the isengard jumpox on campus then just run `.isen_run.sh` on your local machine
+In your `.ssh` file set up and entry called `isen_jumpbox` that connects to the isengard jumpox on campus then just run `./isen_run.sh` on your local machine
 
 Do note that as of right now `.isen_run.sh` has no way to configure what scheema to updload to and will just upload to your personal scheema 
 ### Non mines student

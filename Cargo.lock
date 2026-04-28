@@ -222,6 +222,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "flock-locator"
+version = "0.1.0"
+dependencies = [
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "flume"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
