@@ -106,7 +106,7 @@ async fn get_database_connection() -> PgConnection {
 fn visible_search(long: f64, lat: f64, flock_only: bool, rt: Runtime) {
     let mut conn = rt.block_on(get_database_connection());
     let query = async {
-        sqlx::query("SELECT node_id, surviellance_zone, manufacturer, ST_X(position::geometry) as long, ST_Y(position::geometry) as lat,
+        sqlx::query("SELECT node_id, surviellance_zone, manufacturer, operator, ST_X(position::geometry) as long, ST_Y(position::geometry) as lat,
             ST_Distance(
                 ST_Transform(ST_SetSRID(ST_MakePoint($1, $2),4326), 3857),
                 ST_Transform(position::geometry, 3857)
@@ -129,10 +129,11 @@ fn visible_search(long: f64, lat: f64, flock_only: bool, rt: Runtime) {
     let id: i64 = query_res.get(0);
     let surviellance_zone: Option<&str> = query_res.get(1);
     let manufacturer: &str = query_res.get(2);
-    let long: f64 = query_res.get(3);
-    let lat: f64 = query_res.get(4);
-    let distance_meters: f64 = query_res.get(5);
-    let heading: f64 = query_res.get(6);
+    let operator: Option<&str> = query_res.get(3);
+    let long: f64 = query_res.get(4);
+    let lat: f64 = query_res.get(5);
+    let distance_meters: f64 = query_res.get(6);
+    let heading: f64 = query_res.get(7);
 
     let mut visible = false;
     if distance_meters <= 100.0 {
@@ -160,6 +161,11 @@ fn visible_search(long: f64, lat: f64, flock_only: bool, rt: Runtime) {
     if let Some(zone) = surviellance_zone {
         print!(" to survey {} areas", zone);
     }
+
+    if let Some(operators) = operator {
+        print!(" its operated by {}", operators);
+    }
+
     print!("\nyou are {:.2}m away from the camera", distance_meters);
     if visible {
         println!("\nYOU ARE LIKELY VISIBLE TO THIS CAMERA");

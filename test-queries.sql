@@ -5,7 +5,7 @@ set search_path TO group120800, public;
 
 -- -105.222559 39.746179 closer to camera
 SELECT manufacturer, ST_AsText(position) as pos,
-  position,
+  position, operator,
   ST_Distance(
     ST_Transform(ST_SetSRID(ST_MakePoint(-105.222559 , 39.746179),4326), 3857),
     ST_Transform(position::geometry, 3857)
