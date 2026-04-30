@@ -4,13 +4,17 @@ set search_path TO group120800, public;
 -- query to get the closest camera to you units in meters?
 
 -- -105.222559 39.746179 closer to camera
-SELECT manufacturer, ST_AsText(position) as pos, 
+SELECT manufacturer, ST_AsText(position) as pos,
+  position,
   ST_Distance(
     ST_Transform(ST_SetSRID(ST_MakePoint(-105.222559 , 39.746179),4326), 3857),
     ST_Transform(position::geometry, 3857)
-  ) * cosd(39.746179) as distance FROM alpr ORDER BY 
+  ) * cosd(39.746179) as distance,
+  -- ooogy moogy
+  DEGREES(ST_Azimuth(position::geometry, ST_SetSRID(ST_MakePoint(-105.222559, 39.746179), 4326))) as angle
+  FROM alpr ORDER BY 
     ST_Distance(
       ST_SetSRID(ST_MakePoint(-105.220660, 39.746179),4326),
       position
     )
-    LIMIT 5;
+    LIMIT 1;

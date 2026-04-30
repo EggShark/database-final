@@ -31,6 +31,7 @@ async fn main() {
     let (user_name, password) = CREDS.split_once('\n').unwrap();
 
     let mut scheema: &str = user_name;
+    let mut cameras = true;
     let mut server: &str = "ada.mines.edu/csci403";
 
     let mut args = args.iter().peekable();
@@ -43,15 +44,23 @@ async fn main() {
                 scheema = s.as_str();
                 args.next();
             } else {
-                println!("expected scheema after {} flag", arg)
+                println!("expected scheema after {} flag", arg);
+                return;
             },
             "-u" | "--url" => if let Some(s) = args.peek() {
                 server = s.as_str();
                 args.next();
             } else {
-                println!("expected a server url after {} flag", arg)
+                println!("expected a server url after {} flag", arg);
+                return;
             },
-            a => println!("unknwon arg of {}", a),
+            "-nc" | "--no-cameras" => {
+                cameras = false;
+            }
+            a => {
+                println!("unknwon arg of {}", a);
+                return;
+            }
         }
     }
 
@@ -60,13 +69,18 @@ async fn main() {
 
 
     let mut con = PgConnection::connect(&url).await.unwrap();
-    let setup = delete_and_create_tables(&mut con, scheema);
+    let setup = delete_and_create_tables(&mut con, scheema, cameras);
 
     let data = extract_alpr_data_from_geojson("ALPRs.geojson");
     setup.await;
+    if cameras {
+        upload_cameras(data, &mut con).await;
+    }
 
+}
 
-    sqlx::query("BEGIN").execute(&mut con).await.unwrap();
+async fn upload_cameras(data: Vec<Alpr>, conn: &mut PgConnection) {
+    sqlx::query("BEGIN").execute(&mut *conn).await.unwrap();
     for alpr in data.iter() {
         let h = sqlx::query(
            "INSERT INTO ALPR (node_id, manufacturer, operator, surveillance_type, surviellance_zone, position) VALUES (
@@ -85,20 +99,20 @@ async fn main() {
            .bind(&alpr.surveillance_zone)
            .bind(alpr.position.0)
            .bind(alpr.position.1)
-           .execute(&mut con)
+           .execute(&mut *conn)
            .await;
 
         match h {
             Ok(_) => {}
             Err(e) => {
                 println!("Failed to insernt ALRP with id {} becuase {:?}", alpr.id, e);
-                sqlx::query("ROLLBACK").execute(&mut con).await.unwrap();
+                sqlx::query("ROLLBACK").execute(&mut *conn).await.unwrap();
                 continue;
             }
         }
         println!("ALRP with id {} inserted!", alpr.id);
     }
-    sqlx::query("COMMIT").execute(&mut con).await.unwrap();
+    sqlx::query("COMMIT").execute(&mut *conn).await.unwrap();
 
 
     let mut failed_dirs = vec![];
@@ -106,59 +120,59 @@ async fn main() {
         if alpr.directions.is_empty() {
             continue;
         }
-        sqlx::query("BEGIN").execute(&mut con).await.unwrap();
+        sqlx::query("BEGIN").execute(&mut *conn).await.unwrap();
         for dir in alpr.directions {
             let q2 = sqlx::query("INSERT INTO ALPR_direction (node_id, direction) VALUES ($1, $2)")
                 .bind(alpr.id)
                 .bind(dir)
-                .execute(&mut con)
+                .execute(&mut *conn)
                 .await;
 
             match q2 {
                 Ok(_) => {},
                 Err(e) => {
                     println!("Failed to insernt ALRP_direction with id {} becuase {:?}", alpr.id, e);
-                    sqlx::query("ROLLBACK").execute(&mut con).await.unwrap();
+                    sqlx::query("ROLLBACK").execute(&mut *conn).await.unwrap();
                     failed_dirs.push((alpr.id, dir));
                     continue;
                 }
             }
         }
-        sqlx::query("COMMIT").execute(&mut con).await.unwrap();
+        sqlx::query("COMMIT").execute(&mut *conn).await.unwrap();
         println!("ALPR direction, {} inserted", alpr.id);
     }
 
     println!("failed to insert: {}, retrying now", failed_dirs.len());
     for (id, dir) in failed_dirs {
-        sqlx::query("BEGIN").execute(&mut con).await.unwrap();
+        sqlx::query("BEGIN").execute(&mut *conn).await.unwrap();
         let q2 = sqlx::query("INSERT INTO ALPR_direction (node_id, direction) VALUES ($1, $2)")
                 .bind(id)
                 .bind(dir)
-                .execute(&mut con)
+                .execute(&mut *conn)
                 .await;
         match q2 {
             Ok(_) => {}
             Err(e) => {
                 println!("{} failed second chance becuase {:?}", id, e);
-                sqlx::query("ROLLBACK").execute(&mut con).await.unwrap();
+                sqlx::query("ROLLBACK").execute(&mut *conn).await.unwrap();
                 continue;
             }
         }
-        sqlx::query("COMMIT").execute(&mut con).await.unwrap();
+        sqlx::query("COMMIT").execute(&mut *conn).await.unwrap();
     }
-
 
 }
 
-async fn delete_and_create_tables(pool: &mut PgConnection, primary_zone: &str) {
+async fn delete_and_create_tables(pool: &mut PgConnection, primary_zone: &str, cameras: bool) {
     let search_path = format!("SET search_path TO {}, public", primary_zone);
-    // let search_path = "SET search_path TO group120800, public";
 
     sqlx::query(&search_path).execute(&mut *pool).await.unwrap();
-    sqlx::query("DROP TABLE IF EXISTS ALPR_direction").execute(&mut *pool).await.unwrap();
-    sqlx::query("DROP TABLE IF EXISTS ALPR").execute(&mut *pool).await.unwrap();
-
-    sqlx::query("CREATE TABLE alpr (
+    sqlx::query("DROP TABLE IF EXISTS state_border").execute(&mut *pool).await.unwrap();
+    if cameras {
+        sqlx::query("DROP TABLE IF EXISTS alpr_direction").execute(&mut *pool).await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS alpr").execute(&mut *pool).await.unwrap();
+    
+        sqlx::query("CREATE TABLE alpr (
             node_id BIGINT NOT NULL,
             manufacturer VARCHAR NOT NULL,
             operator VARCHAR,
@@ -166,12 +180,19 @@ async fn delete_and_create_tables(pool: &mut PgConnection, primary_zone: &str) {
             surviellance_zone VARCHAR,
             position geography(POINT) NOT NULL,
             PRIMARY KEY (node_id)
-    )").execute(&mut *pool).await.unwrap();
+        )").execute(&mut *pool).await.unwrap();
 
-    sqlx::query("CREATE TABLE alpr_direction (
+        sqlx::query("CREATE TABLE alpr_direction (
             node_id BIGINT REFERENCES alpr (node_id),
             direction INTEGER
-    )").execute(pool).await.unwrap();
+        )").execute(&mut *pool).await.unwrap();
+    }
+
+    sqlx::query("CREATE TABLE state_border (
+        state_name VARCHAR NOT NULL,
+        border geography(POLYGON) NOT NULL,
+        PRIMARY KEY (state_name)
+    )").execute(&mut *pool).await.unwrap();
 }
 
 fn extract_alpr_data_from_geojson<P: AsRef<Path>>(path: P) -> Vec<Alpr> {
