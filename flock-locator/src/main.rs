@@ -1,12 +1,19 @@
 use sqlx::{query, Connection, PgConnection, Row};
 use tokio::runtime::Runtime;
 
+use serde_json::value::Value;
+
+
+use std::collections::HashSet;
 use std::env;
+use std::io::{BufReader, Write};
+use std::io;
+use std::fs::File;
 
 const CREDS: &str = include_str!("../../secret");
+const CAMERA_FOV: f64 = 120.0001;
 
 fn main() {
-    println!("Hello, world!");
     let args: Vec<String> = env::args().collect();
     let path = &args[0];
     let arg_len = args.len();
@@ -28,32 +35,52 @@ fn main() {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-v" | "--v" => {
-                let (mut long, mut lat) = (0.0, 0.0);
-                if let Some(v) = args.peek() {
+                let long = if let Some(v) = args.peek() {
                     match v.parse() {
-                        Ok(v) => long = v,
+                        Ok(v) => v,
                         Err(_) => {
                             println!("Exected validing floating point for longitude");
                             usage(&path);
                             return;
                         }
                     }
-                }
+                } else {
+                    println!("Must be given two points for {} flag", arg);
+                    usage(&path);
+                    return;
+                };
                 args.next().unwrap();
-                if let Some(v) = args.peek() {
+                let lat = if let Some(v) = args.peek() {
                     match v.parse() {
-                        Ok(v) => lat = v,
+                        Ok(v) => v,
                         Err(_) => {
                             println!("Expected valid floating point for latitude");
                             usage(&path);
                             return;
                         }
                     }
-                }
+                } else {
+                    println!("Must be given two points for {} flag", arg);
+                    usage(&path);
+                    return
+                };
                 args.next().unwrap();
-                operation = Some(Opertation::Visibile(long, lat));
+                operation = Some(Opertation::Visibile(lat, long));
+            }
+            "-p" | "--p" => {
+                let mut path = String::new();
+                if let Some(peeked_path) = args.next() {
+                    path = peeked_path;
+                } else {
+                    println!("Must be given file path for {} flag", arg);
+                }
+                operation = Some(Opertation::Path(path));
             }
             "-f" | "--flock" => flock_only = true,
+            "-h" | "--help" => {
+                usage(&path);
+                return;
+            }
             a => {
                 println!("Unknown argument of {} found", a);
                 usage(&path);
@@ -69,13 +96,15 @@ fn main() {
     }
 
     match operation.unwrap() {
-        Opertation::Visibile(long, lat) => visible_search(long, lat, flock_only, rt),
+        Opertation::Visibile(lat, long) => visible_search(lat, long, flock_only, rt),
+        Opertation::Path(val) => path_visibile_search(&val, rt, flock_only),
         _ => todo!()
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Opertation {
+    Path(String),
     Visibile(f64, f64),
     Edit,
     // for sqlx data typing but in reality its always going to be postive
@@ -87,8 +116,10 @@ enum Opertation {
 fn usage(path: &str) {
     println!("{} [--flags]
     At least 1 flag is required!
-    -v, --visible long lat: Will tell you the closest ALPR and if you are likely visible or not
+    -v, --visible <long> <lat>: Will tell you the closest ALPR and if you are likely visible or not
         -f, --flock: Additional flag to toggle only searching for Flock Saftey cameras
+    -p, --path <path>: Give a route downloaded from OSM in geoJSON it will tell you what ALPRs will spot you
+        -f, --flock: Additional flag to toggle only search for Flock Saftey camers
     -e, --edit: Will start the prompting to enter information for a new ALPR
     -d, --delete id: Deletes the ALPR with the sepcificed id
     -c, --create: Will start the prompting to create a new camera
@@ -103,22 +134,216 @@ async fn get_database_connection() -> PgConnection {
     conn
 }
 
-fn visible_search(long: f64, lat: f64, flock_only: bool, rt: Runtime) {
+fn path_visibile_search(path: &str, rt: Runtime, flock_only: bool) {
+    let file = match File::open(path) {
+        Ok(v) => v,
+        Err(_) => {
+            println!("Error: Was not a valid file path");
+            return;
+        }
+    };
+    let reader = BufReader::new(file);
+    let value: Value = match serde_json::from_reader(reader) {
+        Ok(v) => v,
+        Err(_) => {
+            println!("File at {} was not valid geoJSON data", path);
+            return;
+        }
+    };
+
+    let geomerty = match value.get("geometry") {
+        Some(g) => g,
+        None => {
+            println!("Exepcted geometry tag in geoJSON data");
+            return;
+        }
+    };
+
+    match geomerty.get("type") {
+        Some(Value::String(s)) => {
+            match s.as_str() {
+                "LineString" => {},
+                _ => {
+                    println!("Expected LinsString geomerty");
+                    return;
+                }
+            }
+        },
+        _ => {
+            println!("Expected LineString geomerty");
+            return;
+        }
+    }
+
+    let coord_list = match geomerty.get("coordinates") {
+        Some(Value::Array(v)) => v,
+        _ => {
+            println!("Expected coordinate array");
+            return;
+        }
+    };
+
+    let mut visble_nodes: HashSet<i64> = HashSet::new();
+
     let mut conn = rt.block_on(get_database_connection());
-    let query = async {
-        sqlx::query("SELECT node_id, surviellance_zone, manufacturer, operator, ST_X(position::geometry) as long, ST_Y(position::geometry) as lat,
+    let query_str = format!("SELECT node_id, ST_Distance(
+                ST_Transform(ST_SetSRID(ST_MakePoint($1, $2),4326), 3857),
+                ST_Transform(position::geometry, 3857)
+            ) * cosd(39.746179) as distance,
+            DEGREES(ST_Azimuth(position::geometry, ST_SetSRID(ST_MakePoint($1, $2), 4326))) as headning
+            FROM alpr
+            WHERE ST_Distance(
+                ST_Transform(ST_SetSRID(ST_MakePoint($1, $2),4326), 3857),
+                ST_Transform(position::geometry, 3857)
+            ) * cosd(39.746179)  < 100 {} 
+            ORDER BY ST_Distance(
+                ST_Transform(ST_SetSRID(ST_MakePoint($1, $2),4326), 3857),
+                ST_Transform(position::geometry, 3857)
+            ) * cosd(39.746179) LIMIT 1", if flock_only {"AND manufacturer = 'Flock Saftey'"} else {""});
+    for value in coord_list {
+        let long = match value[0].as_f64() {
+            Some(v) => v,
+            None => {
+                println!("Expected latitute in coordinates");
+                return;
+            }
+        };
+        let lat = match value[1].as_f64() {
+            Some(v) => v,
+            None => {
+                println!("Expected longitude in coordinates");
+                return;
+            }
+        };
+        let query = async {
+            sqlx::query(&query_str)
+                .bind(long)
+                .bind(lat)
+                .fetch_one(&mut conn)
+                .await
+        };
+        let query_res = match rt.block_on(query) {
+            Ok(res) => res,
+            Err(sqlx::Error::RowNotFound) => continue,
+            Err(e) => {
+                println!("UH OG {:?}", e);
+                return;
+            }
+        };
+        let node_id: i64 = query_res.get(0);
+        let heading: f64 = query_res.get(2);
+        if !visble_nodes.contains(&node_id) {
+            let query  = async {
+                sqlx::query("SELECT direction FROM alpr as a JOIN alpr_direction USING(node_id) WHERE a.node_id = $1")
+                    .bind(node_id)
+                    .fetch_all(&mut conn)
+                .   await
+            };
+
+            let dir_res = match rt.block_on(query) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("UH OG {:?}", e);
+                    return;
+                }
+            };
+
+            if dir_res.is_empty() {
+                // take the conservative approach to where if direction isn't listed then its 360
+                // vision
+                visble_nodes.insert(node_id);
+                continue;
+            }
+
+            for row in dir_res {
+                let pointing_in: i32 = row.get(0);
+                let d1 = (heading - pointing_in as f64).abs();
+                let d2 = (heading - (360 + pointing_in) as f64).abs();
+                if d1 <= CAMERA_FOV || d2 <= CAMERA_FOV {
+                    visble_nodes.insert(node_id);
+                    break;
+                }
+            }
+        }
+    }
+    println!("On your path you will be visible to {} cameras", visble_nodes.len());
+    print!("Would you like to view these cameras information (y/N): ");
+    let stdin = io::stdin();
+    io::stdout().flush().ok();
+    let mut input = String::new();
+    loop {
+        stdin.read_line(&mut input).expect("Could not read from stdin");
+        match input.trim() {
+            "y" | "Y" => break,
+            "n" | "N" => return,
+            _ => {
+                println!("Input not vald: ");
+                print!("Would you like to view these camera's information (y/N)");
+                io::stdout().flush().ok();
+            }
+        }
+    }
+
+    if visble_nodes.is_empty() {
+        println!("Nothing to elaborate on!");
+        return;
+    }
+    println!("Camera information is:");
+    let mut second_query_str = String::from("SELECT node_id, ST_AsText(position), manufacturer, operator, surviellance_zone from alpr WHERE node_id IN (");
+    for node_id in visble_nodes {
+        second_query_str.push_str(&node_id.to_string());
+        second_query_str.push(',');
+    }
+    // remove trailing comma cause sql :(
+    second_query_str.pop();
+    second_query_str.push(')');
+
+    let info_query = async {
+        sqlx::query(&second_query_str)
+            .fetch_all(&mut conn)
+            .await
+    };
+    let info_query_rs = match rt.block_on(info_query) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("Error with getting camera info {:?}", e);
+            return;
+        }
+    };
+
+    for row in info_query_rs {
+        let id: i64 = row.get(0);
+        let pos_str: &str = row.get(1);
+        let manufacturer: &str = row.get(2);
+        let operator: Option<&str> = row.get(3);
+        let surviellance_zone: Option<&str> = row.get(4);
+        print!("You were seen by camera {}, located at {} made by: {}", id, pos_str, manufacturer);
+        if let Some(op) = operator {
+            print!(" operated by {}", op);
+        }
+        if let Some(zone) = surviellance_zone {
+            print!(" to survey {} zones", zone);
+        }
+        println!();
+    }
+}
+
+fn visible_search(lat: f64, long: f64, flock_only: bool, rt: Runtime) {
+    let mut conn = rt.block_on(get_database_connection());
+    let query_str = format!("SELECT node_id, surviellance_zone, manufacturer, operator, ST_X(position::geometry) as long, ST_Y(position::geometry) as lat,
             ST_Distance(
                 ST_Transform(ST_SetSRID(ST_MakePoint($1, $2),4326), 3857),
                 ST_Transform(position::geometry, 3857)
             ) * cosd(39.746179) as distance,
             DEGREES(ST_Azimuth(position::geometry, ST_SetSRID(ST_MakePoint($1, $2), 4326)))
-            FROM alpr ORDER BY 
+            {} FROM alpr ORDER BY 
             ST_Distance(
                 ST_SetSRID(ST_MakePoint($1, $2),4326),
                 position
             )
-            LIMIT 1;"
-        )
+            LIMIT 1;", if flock_only {"WHERE manufacturer = 'Flock Saftey'"} else {""});
+    let query = async {
+        sqlx::query(&query_str)
         .bind(long)
         .bind(lat)
         .fetch_one(&mut conn)
@@ -150,7 +375,7 @@ fn visible_search(long: f64, lat: f64, flock_only: bool, rt: Runtime) {
             // assuming 90 degree FOV
             let diffrence = (heading - direction as f64).abs();
             let diffrence2 = (heading - (direction + 360) as f64).abs();
-            if diffrence <= 90.0001 || diffrence2 <= 90.0001 {
+            if diffrence <= CAMERA_FOV || diffrence2 <= CAMERA_FOV {
                 visible = true;
                 break;
             }

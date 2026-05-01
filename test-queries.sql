@@ -18,3 +18,5 @@ SELECT manufacturer, ST_AsText(position) as pos,
       position
     )
     LIMIT 1;
+
+SELECT * FROM alpr WHERE node_id IN (11232228563, 9232283, 891419347);
