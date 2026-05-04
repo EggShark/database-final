@@ -117,7 +117,8 @@ fn main() {
                 args.next().unwrap();
                 operation = Some(Opertation::Edit(id));
 
-            }
+            },
+            "-c" | "--create" => operation = Some(Opertation::Create),
             a => {
                 println!("Unknown argument of {} found", a);
                 usage(&path);
@@ -137,7 +138,7 @@ fn main() {
         Opertation::Path(val) => path_visibile_search(&val, rt, flock_only),
         Opertation::Delete(val) => delete_node(val, rt),
         Opertation::Edit(val) => edit_node(val, rt),
-        _ => todo!()
+        Opertation::Create => create_node(rt),
     }
 }
 
