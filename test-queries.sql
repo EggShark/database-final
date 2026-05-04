@@ -4,7 +4,7 @@ set search_path TO group120800, public;
 -- query to get the closest camera to you units in meters?
 
 -- -105.222559 39.746179 closer to camera
-SELECT manufacturer, ST_AsText(position) as pos,
+SELECT node_id, manufacturer, ST_AsText(position) as pos,
   position, operator,
   ST_Distance(
     ST_Transform(ST_SetSRID(ST_MakePoint(-105.222559 , 39.746179),4326), 3857),

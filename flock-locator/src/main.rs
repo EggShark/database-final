@@ -80,6 +80,43 @@ fn main() {
             "-h" | "--help" => {
                 usage(&path);
                 return;
+            },
+            "-d" | "--delete" => {
+                let id = if let Some(peeked_id) = args.peek() {
+                    match peeked_id.parse() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            println!("Must be given an valid node id for deletetion");
+                            usage(&path);
+                            return
+                        }
+                    }
+                } else {
+                    println!("Must be given an node id to delete");
+                    usage(&path);
+                    return;
+                };
+                args.next().unwrap();
+                operation = Some(Opertation::Delete(id));
+            },
+            "-e" | "--edit" => {
+                let id = if let Some(peeked_id) = args.peek() {
+                    match peeked_id.parse() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            println!("Must be given an valid node id for editing");
+                            usage(&path);
+                            return
+                        }
+                    }
+                } else {
+                    println!("Must be given an node id to edit");
+                    usage(&path);
+                    return;
+                };
+                args.next().unwrap();
+                operation = Some(Opertation::Edit(id));
+
             }
             a => {
                 println!("Unknown argument of {} found", a);
@@ -98,6 +135,8 @@ fn main() {
     match operation.unwrap() {
         Opertation::Visibile(lat, long) => visible_search(lat, long, flock_only, rt),
         Opertation::Path(val) => path_visibile_search(&val, rt, flock_only),
+        Opertation::Delete(val) => delete_node(val, rt),
+        Opertation::Edit(val) => edit_node(val, rt),
         _ => todo!()
     }
 }
@@ -106,11 +145,10 @@ fn main() {
 enum Opertation {
     Path(String),
     Visibile(f64, f64),
-    Edit,
+    Edit(i64),
     // for sqlx data typing but in reality its always going to be postive
     Delete(i64),
     Create,
-    Help,
 }
 
 fn usage(path: &str) {
@@ -267,19 +305,20 @@ fn path_visibile_search(path: &str, rt: Runtime, flock_only: bool) {
         }
     }
     println!("On your path you will be visible to {} cameras", visble_nodes.len());
-    print!("Would you like to view these cameras information (y/N): ");
+    print!("Would you like to view these cameras information (Y/n): ");
     let stdin = io::stdin();
     io::stdout().flush().ok();
     let mut input = String::new();
     loop {
         stdin.read_line(&mut input).expect("Could not read from stdin");
         match input.trim() {
-            "y" | "Y" => break,
-            "n" | "N" => return,
-            _ => {
-                println!("Input not vald: ");
-                print!("Would you like to view these camera's information (y/N)");
+            "y" | "Y" | "" => break,
+            "n" | "N"  => return,
+            v => {
+                println!("Input of \"{}\" not valid", v);
+                print!("Would you like to view these camera's information (Y/n): ");
                 io::stdout().flush().ok();
+                input.clear();
             }
         }
     }
@@ -397,4 +436,380 @@ fn visible_search(lat: f64, long: f64, flock_only: bool, rt: Runtime) {
     } else {
         println!("\nIt is unlikely that you are visible");
     }
+}
+
+fn delete_node(node_id: i64, rt: Runtime) {
+    let mut conn = rt.block_on(get_database_connection());
+    // start transaction
+    rt.block_on(async {
+        sqlx::query("BEGIN").execute(&mut conn).await.unwrap();
+    });
+    let delete = async {
+        sqlx::query("DELETE FROM alpr WHERE node_id = $1").bind(node_id).execute(&mut conn).await
+    };
+
+    
+
+    match rt.block_on(delete) {
+        Ok(_) => {},
+        Err(e) => {
+            println!("Unable to delete node with id {} because {}", node_id, e);
+            rt.block_on(async {sqlx::query("ROLLBACK").execute(&mut conn).await.unwrap()});
+        }
+    };
+
+    let delete_dirs = async {
+        sqlx::query("DELETE FROM alpr_direction WHERE node_id = $1").bind(node_id).execute(&mut conn).await
+    };
+
+    match rt.block_on(delete_dirs) {
+        Ok(_) => {},
+        Err(e) => {
+            println!("Unable to delete node with id {}, because {}", node_id, e);
+            rt.block_on(async {sqlx::query("ROLLBACK").execute(&mut conn).await.unwrap()});
+        }
+    }
+
+    print!("Are you sure you want to delete node with id {}, (y/N): ", node_id);
+    let stdin = io::stdin();
+    io::stdout().flush().ok();
+    let mut input = String::new();
+    loop {
+        stdin.read_line(&mut input).expect("Could not read from stdin");
+        match input.trim() {
+            "y" | "Y"  => break,
+            "n" | "N" | "" => {
+                rt.block_on(async {
+                    sqlx::query("ROLLBACK").execute(&mut conn).await.unwrap();
+                });
+                println!("Rolled back change");
+                return;
+            },
+            v => {
+                println!("Input of \"{}\" not valid", v);
+                print!("Are you sure you want to delete node with id {} (y/N): ", node_id);
+                io::stdout().flush().ok();
+                input.clear();
+            }
+        }
+    }
+
+    // dont want this actually edditing the data base while still developing
+    // will change 
+    rt.block_on(async {
+        sqlx::query("ROLLBACK").execute(&mut conn).await.unwrap();
+    });
+    println!("Removed camera with node id {} from the data base", node_id);
+}
+
+fn create_node(rt: Runtime) {
+    let mut conn = rt.block_on(get_database_connection());
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+
+    let mut node_id_str = String::new();
+    print!("Enter the node_id (NOT OPTIONAL): ");
+    stdout.flush().ok();
+    stdin.read_line(&mut node_id_str).expect("Could not read from stdin");
+    let node_id = match node_id_str.trim().parse::<i64>() {
+        Ok(v) => v,
+        Err(_) => {
+            println!("node id must be a valid integer");
+            return;
+        }
+    };
+
+    let mut manufacturer = String::new();
+    print!("Enter the manufacturer of the camera (NOT OPTIONAL): ");
+    stdout.flush().ok();
+    stdin.read_line(&mut manufacturer).expect("Could not read from stdin");
+    
+    if manufacturer.trim().is_empty() {
+        println!("manufacturer is not an optional field");
+        return;
+    }
+
+    let mut long_str = String::new();
+    print!("Enter the longitude of the camera in WGS84 (NOT OPTIONAL): ");
+    stdout.flush().ok();
+    stdin.read_line(&mut long_str).expect("Could not read from stdin");
+    let long = match long_str.trim().parse::<f64>() {
+        Ok(v) => v,
+        Err(_) => {
+            println!("Longitude must be a valid floating point number");
+            return;
+        }
+    };
+
+    let mut lat_str = String::new();
+    print!("Enter the latitude of the camera in WGS84 (NOT OPTIONAL): ");
+    stdout.flush().ok();
+    stdin.read_line(&mut lat_str).expect("Could not read from stdin");
+    let lat = match lat_str.trim().parse::<f64>() {
+        Ok(v) => v,
+        Err(_) => {
+            println!("Latitude must be a valid floating point number");
+            return;
+        }
+    };
+
+   let mut operator_str = String::new();
+   print!("Enter the operator of the camera (leave blank for NULL): ");
+   stdout.flush().ok();
+   stdin.read_line(&mut operator_str).expect("Could not read from stdin");
+   let operator = match operator_str.trim() {
+       "" => None,
+       v => Some(v)
+   };
+
+   let mut surviellance_zone_str = String::new();
+   print!("Enter the type of zone the camera surveys (leave blank for NULL): ");
+   stdout.flush().ok();
+   stdin.read_line(&mut surviellance_zone_str).expect("Could not read from stdin");
+   let surviellance_zone = match surviellance_zone_str.trim() {
+       "" => None,
+       v => Some(v)
+   };
+
+   let mut directions_str = String::new();
+   print!("Enter the directions the camera points seperated by commas: ");
+   stdout.flush().ok();
+   stdin.read_line(&mut directions_str).expect("Could not read from stdin");
+
+   let directions = directions_str
+        .trim()
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|d| (d.trim().parse::<i64>().expect("Requires valid integers for directions") % 360).abs()).collect::<Vec<i64>>();
+
+   // insert stuff
+   let insert_query = async {
+       sqlx::query("INSERT INTO ALPR (node_id, manufacturer, operator, surveillance_type, surviellance_zone, position) VALUES (
+               $1,
+               $2,
+               $3,
+               'alpr',
+               $4,
+               ST_SetSRID(ST_MakePoint($5, $6),4326)
+           )")
+           .bind(node_id)
+           .bind(manufacturer)
+           .bind(operator)
+           .bind(surviellance_zone)
+           .bind(long)
+           .bind(lat)
+           .execute(&mut conn)
+           .await
+   };
+
+   match rt.block_on(insert_query) {
+       Ok(_) => {},
+       Err(e) => {
+           println!("Falied to insert the node because {}", e);
+           rt.block_on(async {sqlx::query("ROLLBACK").execute(&mut conn).await.unwrap()});
+           return;
+       }
+   }
+
+   let dir_str = "INSERT INTO alpr_direction (node_id, direction) VALUES ($1, $2)";
+   for dir in directions {
+        let dir_insert = async {
+            sqlx::query(dir_str)
+                .bind(node_id)
+                .bind(dir)
+                .execute(&mut conn)
+                .await
+        };
+        match rt.block_on(dir_insert) {
+            Ok(_) => {},
+            Err(e) => {
+                println!("Failed to insert the camera direction because {}", e);
+                rt.block_on(async {sqlx::query("ROLLBACK").execute(&mut conn).await.unwrap()});
+                return;
+            }
+        }
+   }
+
+   
+   print!("Are you sure you want to insert node with id {}, (y/N): ", node_id);
+   let stdin = io::stdin();
+   io::stdout().flush().ok();
+   let mut input = String::new();
+   loop {
+        stdin.read_line(&mut input).expect("Could not read from stdin");
+        match input.trim() {
+            "y" | "Y"  => break,
+            "n" | "N" | "" => {
+                rt.block_on(async {
+                    sqlx::query("ROLLBACK").execute(&mut conn).await.unwrap();
+                });
+                println!("Rolled back change");
+                return;
+            },
+            v => {
+                println!("Input of \"{}\" not valid", v);
+                print!("Are you sure you want to insert node with id {} (y/N): ", node_id);
+                io::stdout().flush().ok();
+                input.clear();
+            }
+        }
+    }
+
+   rt.block_on(async {
+        sqlx::query("ROLLBACK").execute(&mut conn).await.unwrap();
+   });
+   println!("Node sucessfully inserted!");
+}
+
+fn edit_node(node_id: i64, rt: Runtime) {
+    let mut conn = rt.block_on(get_database_connection());
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+
+    print!("Enter what you'd like to set the manufacturer to (leave blank to leave unchanged): ");
+    stdout.flush().ok();
+    let mut manufacturer = String::new();
+    stdin.read_line(&mut manufacturer).expect("Could not read from stdin");
+
+    print!("Enter what you'd like to set the operator to (leave blank to leave unchaged): ");
+    stdout.flush().ok();
+    let mut operator = String::new();
+    stdin.read_line(&mut operator).expect("Could not read from stdin");
+
+    print!("Enter what you'd like to set the surviellance_zone to be (leave blank to leave unchanged): ");
+    stdout.flush().ok();
+    let mut surviellance_zone = String::new();
+    stdin.read_line(&mut surviellance_zone).expect("Could not read from stdin");
+
+    print!("Enter what you'd like to set the pointing directions to be (seperated by commas): ");
+    stdout.flush().ok();
+    let mut directions = String::new();
+    stdin.read_line(&mut directions).expect("Could not read from stdin");
+
+    let directions = directions
+        .trim()
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|d| (d.trim().parse::<i64>().expect("Requires valid integers for directions") % 360).abs()).collect::<Vec<i64>>();
+
+    let roll_back_query = sqlx::query("ROLLBACK");
+
+    rt.block_on(async {sqlx::query("BEGIN").execute(&mut conn).await.unwrap()});
+    if !manufacturer.trim().is_empty() {
+        let query = async {
+            sqlx::query("UPDATE alpr SET manufacturer = $1 WHERE node_id = $2")
+                .bind(manufacturer.trim())
+                .bind(node_id)
+                .execute(&mut conn)
+                .await
+        };
+
+        match rt.block_on(query) {
+            Ok(_) => {},
+            Err(e) => {
+                println!("Failed to updated maunfacturer because {}, rolling back and aborting", e);
+                rt.block_on(roll_back_query.execute(&mut conn)).unwrap();
+                return;
+            }
+        }
+    }
+
+    if !operator.trim().is_empty() {
+        let query = async {
+            sqlx::query("UPDATE alpr SET operator = $1 WHERE node_id = $2")
+                .bind(operator.trim())
+                .bind(node_id)
+                .execute(&mut conn)
+                .await
+        };
+
+        match rt.block_on(query) {
+            Ok(_) => {},
+            Err(e) => {
+                println!("Failed to update operator because {}, rolling back and aborting", e);
+                rt.block_on(roll_back_query.execute(&mut conn)).unwrap();
+                return;
+            }
+        }
+    }
+
+    if !surviellance_zone.trim().is_empty() {
+        let query = async {
+            sqlx::query("UPDATE alpr SET surviellance_zone = $1 WHERE node_id = $2")
+                .bind(surviellance_zone.trim())
+                .bind(node_id)
+                .execute(&mut conn)
+                .await
+        };
+
+        match rt.block_on(query) {
+            Ok(_) => {},
+            Err(e) => {
+                println!("Failed to updated surviellance zone becuase {} rolling back and aborting", e);
+                rt.block_on(roll_back_query.execute(&mut conn)).unwrap();
+                return;
+            }
+        }
+    }
+    let direction_text = "INSERT INTO alpr_direction (node_id, direction) VALUES ($1, $2)";
+    
+    if !directions.is_empty() {
+        // Delete all directions first
+        let delete_query = async {
+            sqlx::query("DELETE FROM alpr_direction WHERE node_id = $1").bind(node_id).execute(&mut conn).await
+        };
+
+        match rt.block_on(delete_query) {
+            Ok(_) => {}
+            Err(e) => {
+                println!("Failed to updated operator because {}, rolling back and aborting", e);
+                rt.block_on(roll_back_query.execute(&mut conn)).unwrap();
+                return;
+            }
+        }
+
+        for dir in directions {
+            let query = async {
+                sqlx::query(direction_text).bind(node_id).bind(dir).execute(&mut conn).await
+            };
+
+            match rt.block_on(query) {
+                Ok(_) => {},
+                Err(e) => {
+                    println!("Failed to insert into directions due to {} rolling back and aborting", e);
+                    rt.block_on(roll_back_query.execute(&mut conn)).unwrap();
+                    return;
+                }
+            }
+        }
+    }
+
+    print!("Are you sure you want to edit node with id {}, (y/N): ", node_id);
+    let stdin = io::stdin();
+    io::stdout().flush().ok();
+    let mut input = String::new();
+    loop {
+        stdin.read_line(&mut input).expect("Could not read from stdin");
+        match input.trim() {
+            "y" | "Y"  => break,
+            "n" | "N" | "" => {
+                rt.block_on(async {
+                    sqlx::query("ROLLBACK").execute(&mut conn).await.unwrap();
+                });
+                println!("Rolled back change");
+                return;
+            },
+            v => {
+                println!("Input of \"{}\" not valid", v);
+                print!("Are you sure you want to edit node with id {} (y/N): ", node_id);
+                io::stdout().flush().ok();
+                input.clear();
+            }
+        }
+    }
+
+    rt.block_on(async {
+        sqlx::query("ROLLBACK").execute(&mut conn).await.unwrap();
+    });
+    println!("Removed camera with node id {} from the data base", node_id);
 }
